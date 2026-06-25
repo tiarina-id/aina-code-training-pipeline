@@ -53,11 +53,22 @@ def load_checkpoint(
         optimizer.load_state_dict(state["optimizer"])
     if scheduler is not None and "scheduler" in state:
         scheduler.load_state_dict(state["scheduler"])
-    if "rng_state" in state:
-        torch.set_rng_state(state["rng_state"])
-    if torch.cuda.is_available() and state.get("cuda_rng_state") is not None:
-        torch.cuda.set_rng_state_all(state["cuda_rng_state"])
+    restore_rng_state(state)
     return state
+
+
+def restore_rng_state(state: dict[str, Any]) -> None:
+    rng_state = state.get("rng_state")
+    if isinstance(rng_state, torch.Tensor):
+        torch.set_rng_state(rng_state.detach().cpu().to(dtype=torch.uint8))
+
+    cuda_rng_state = state.get("cuda_rng_state")
+    if not torch.cuda.is_available() or cuda_rng_state is None:
+        return
+    if isinstance(cuda_rng_state, torch.Tensor):
+        cuda_rng_state = [cuda_rng_state]
+    if isinstance(cuda_rng_state, list) and all(isinstance(item, torch.Tensor) for item in cuda_rng_state):
+        torch.cuda.set_rng_state_all([item.detach().cpu().to(dtype=torch.uint8) for item in cuda_rng_state])
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:

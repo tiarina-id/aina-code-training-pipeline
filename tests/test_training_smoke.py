@@ -105,6 +105,11 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertFalse(report["history"][-1]["val_loss"] != report["history"][-1]["val_loss"])
             self.assertEqual(report["stage"], "sft")
 
+    def test_checkpoint_load_skips_unsupported_rng_state(self):
+        from aina_train.checkpoint import restore_rng_state
+
+        restore_rng_state({"rng_state": ("legacy", "state"), "cuda_rng_state": ("legacy",)})
+
 
 if __name__ == "__main__":
     unittest.main()
