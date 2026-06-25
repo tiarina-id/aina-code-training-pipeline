@@ -4,6 +4,8 @@ import dataclasses
 import json
 import math
 import os
+import shutil
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -30,15 +32,17 @@ def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload
         dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
     device = resolve_device(config.device, local_rank)
     is_master = rank == 0
+    progress = TrainingProgress(enabled=is_master)
+    progress.event("setup", f"project={config.project_name} stage={config.stage} output={config.output_dir}")
     if is_master:
         downloaded = sync_dataset_from_s3(config.s3_dataset, config.dataset_dir)
         if downloaded:
-            print(f"s3_dataset_sync files={len(downloaded)} destination={config.dataset_dir}", flush=True)
+            progress.event("data", f"s3 sync downloaded={len(downloaded)} destination={config.dataset_dir}")
         should_resume = config.resume if resume is None else resume
         if should_resume and not skip_upload:
             restored = restore_training_checkpoint_from_s3(config.s3_output, config.output_dir)
             if restored:
-                print(f"s3_checkpoint_restore files={len(restored)} destination={config.output_dir}", flush=True)
+                progress.event("restore", f"s3 checkpoint files={len(restored)} destination={config.output_dir}")
     if ddp:
         dist.barrier()
 
@@ -58,11 +62,12 @@ def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload
         if not init_path.exists() and config.init_s3_output and is_master:
             restored = restore_training_checkpoint_from_s3(config.init_s3_output, init_path.parent)
             if restored:
-                print(f"s3_init_checkpoint_restore files={len(restored)} destination={init_path.parent}", flush=True)
+                progress.event("restore", f"s3 init checkpoint files={len(restored)} destination={init_path.parent}")
         if ddp:
             dist.barrier()
         if init_path.exists():
             load_checkpoint(init_path, model=model, map_location=device)
+            progress.event("init", f"loaded checkpoint={init_path}")
         else:
             raise FileNotFoundError(
                 f"init_checkpoint is required but missing: {init_path}. "
@@ -86,6 +91,7 @@ def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload
             ) from exc
         start_step = int(state.get("step", 0))
         best_val_loss = state.get("best_val_loss")
+        progress.event("resume", f"checkpoint={latest} step={start_step} best_val_loss={format_metric(best_val_loss)}")
 
     if ddp:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank] if device.type == "cuda" else None)
@@ -97,8 +103,8 @@ def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload
     autocast_context = autocast_for(device, config.dtype)
     history: list[dict[str, Any]] = []
     step = start_step
-    last_log = time.time()
     model.train()
+    progress.start(config, model_config, model, device=device, start_step=start_step, skip_upload=skip_upload)
 
     while step < config.max_steps:
         optimizer.zero_grad(set_to_none=True)
@@ -120,25 +126,24 @@ def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload
         scheduler.step()
         step += 1
 
-        if is_master and (step == 1 or step % config.log_interval == 0):
-            now = time.time()
-            step_tokens = config.batch_size * config.grad_accum_steps * model_config.sequence_length
-            tps = estimate_tokens_per_second(step_tokens * max(1, step - start_step), now - last_log)
-            last_log = now
-            print(
-                f"step={step}/{config.max_steps} loss={total_loss:.4f} lr={scheduler.get_last_lr()[0]:.6g} tok_s={tps:.1f}",
-                flush=True,
-            )
+        if is_master and should_log_step(step, config):
+            progress.step(step, train_loss=total_loss, lr=scheduler.get_last_lr()[0])
 
         if is_master and (step == 1 or step % config.eval_interval == 0 or step == config.max_steps):
+            progress.event("eval", f"step={step}/{config.max_steps} batches={config.eval_batches}")
             val_loss = evaluate(model, val_data, config, device, autocast_context)
             best_val_loss = val_loss if best_val_loss is None else min(best_val_loss, val_loss)
             row = {"step": step, "train_loss": total_loss, "val_loss": val_loss, "lr": scheduler.get_last_lr()[0]}
             history.append(row)
             write_report(config, model_config, model, history, best_val_loss, completed=step >= config.max_steps)
+            progress.event(
+                "eval",
+                f"step={step}/{config.max_steps} train_loss={total_loss:.4f} "
+                f"val_loss={val_loss:.4f} best_val_loss={format_metric(best_val_loss)}",
+            )
 
         if is_master and (step % config.checkpoint_interval == 0 or step == config.max_steps):
-            save_checkpoint(
+            checkpoint_path = save_checkpoint(
                 config.output_dir,
                 model=model,
                 optimizer=optimizer,
@@ -147,24 +152,202 @@ def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload
                 best_val_loss=best_val_loss,
                 config_hash=cfg_hash,
             )
+            progress.event("ckpt", f"step={step}/{config.max_steps} saved={checkpoint_path}")
             if not skip_upload:
+                progress.event("upload", f"checkpoint step={step}/{config.max_steps} destination={config.s3_output}")
                 uploaded = upload_training_checkpoint(config.output_dir, config.s3_output, step=step)
                 if uploaded:
-                    print(f"s3_checkpoint_upload step={step} files={len(uploaded)}", flush=True)
+                    progress.event("upload", f"checkpoint step={step}/{config.max_steps} files={len(uploaded)}")
 
     if is_master:
+        progress.event("save", f"exporting Hugging Face model to {Path(config.output_dir) / 'final_hf'}")
         final_path = save_hf_model(config.output_dir, model, tokenizer)
         report = write_report(config, model_config, model, history, best_val_loss, completed=True)
         report["final_hf_dir"] = str(final_path)
+        if not skip_upload:
+            progress.event("upload", f"outputs destination={config.s3_output}")
         uploaded = [] if skip_upload else upload_outputs(config.output_dir, config.s3_output)
         report["uploaded"] = uploaded
         config.resolved_report_path.write_text(json.dumps(report, indent=2, sort_keys=True))
+        progress.finish(final_path=final_path, uploaded_count=len(uploaded), report_path=config.resolved_report_path)
     else:
         report = {}
 
     if ddp:
         dist.destroy_process_group()
     return report
+
+
+def should_log_step(step: int, config: TrainConfig) -> bool:
+    return config.log_interval > 0 and (step == 1 or step % config.log_interval == 0 or step == config.max_steps)
+
+
+class TrainingProgress:
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self.is_tty = sys.stdout.isatty()
+        self.started_at = time.time()
+        self.interval_at = self.started_at
+        self.interval_step = 0
+        self.start_step = 0
+        self.max_steps = 0
+        self.step_tokens = 0
+        self.progress_active = False
+        self.progress_width = 0
+
+    def start(
+        self,
+        config: TrainConfig,
+        model_config,
+        model: torch.nn.Module,
+        *,
+        device: torch.device,
+        start_step: int,
+        skip_upload: bool,
+    ) -> None:
+        if not self.enabled:
+            return
+        self.started_at = time.time()
+        self.interval_at = self.started_at
+        self.interval_step = start_step
+        self.start_step = start_step
+        self.max_steps = config.max_steps
+        self.step_tokens = config.batch_size * config.grad_accum_steps * model_config.sequence_length
+        effective_batch = config.batch_size * config.grad_accum_steps
+        remaining = max(0, config.max_steps - start_step)
+        self.event(
+            "model",
+            f"name={model_config.name} params={format_count(count_parameters(unwrap_model(model)))} "
+            f"seq_len={model_config.sequence_length} vocab={model_config.vocab_size}",
+        )
+        self.event(
+            "train",
+            f"device={device} dtype={config.dtype} batch={config.batch_size} grad_accum={config.grad_accum_steps} "
+            f"effective_batch={effective_batch} step_tokens={format_count(self.step_tokens)}",
+        )
+        self.event(
+            "schedule",
+            f"start_step={start_step} max_steps={config.max_steps} remaining={remaining} "
+            f"log_every={config.log_interval} eval_every={config.eval_interval} ckpt_every={config.checkpoint_interval}",
+        )
+        self.event(
+            "paths",
+            f"dataset={config.dataset_dir} report={config.resolved_report_path} upload={'off' if skip_upload else 'on'}",
+        )
+
+    def step(self, step: int, *, train_loss: float, lr: float) -> None:
+        if not self.enabled:
+            return
+        now = time.time()
+        interval_steps = max(1, step - self.interval_step)
+        interval_seconds = now - self.interval_at
+        interval_tps = estimate_tokens_per_second(self.step_tokens * interval_steps, interval_seconds)
+        elapsed = now - self.started_at
+        completed_steps = max(1, step - self.start_step)
+        average_tps = estimate_tokens_per_second(self.step_tokens * completed_steps, elapsed)
+        remaining_tokens = max(0, self.max_steps - step) * self.step_tokens
+        eta = remaining_tokens / average_tps if average_tps and average_tps > 0 else math.nan
+        self.interval_at = now
+        self.interval_step = step
+        line = (
+            f"[train] {progress_bar(step, self.max_steps)} "
+            f"step {step}/{self.max_steps} | loss {train_loss:.4f} | lr {lr:.3g} | "
+            f"{format_rate(interval_tps)} | elapsed {format_duration(elapsed)} | eta {format_duration(eta)}"
+        )
+        self.emit_progress(line)
+
+    def event(self, label: str, message: str) -> None:
+        if not self.enabled:
+            return
+        self.clear_progress()
+        print(f"[{label:<8}] {message}", flush=True)
+
+    def finish(self, *, final_path: Path, uploaded_count: int, report_path: Path) -> None:
+        if not self.enabled:
+            return
+        self.clear_progress()
+        elapsed = time.time() - self.started_at
+        print(
+            f"[done    ] final_hf={final_path} report={report_path} "
+            f"uploaded_files={uploaded_count} elapsed={format_duration(elapsed)}",
+            flush=True,
+        )
+
+    def emit_progress(self, line: str) -> None:
+        if not self.is_tty:
+            print(line, flush=True)
+            return
+        line = fit_terminal(line)
+        padding = " " * max(0, self.progress_width - len(line))
+        sys.stdout.write(f"\r{line}{padding}")
+        sys.stdout.flush()
+        self.progress_width = len(line)
+        self.progress_active = True
+
+    def clear_progress(self) -> None:
+        if not self.is_tty or not self.progress_active:
+            return
+        sys.stdout.write("\r" + (" " * self.progress_width) + "\r")
+        sys.stdout.flush()
+        self.progress_active = False
+        self.progress_width = 0
+
+
+def progress_bar(step: int, total: int, *, width: int = 24) -> str:
+    if total <= 0:
+        return "[------------------------]   0.0%"
+    ratio = min(1.0, max(0.0, step / total))
+    filled = int(round(width * ratio))
+    return f"[{'#' * filled}{'-' * (width - filled)}] {ratio * 100:5.1f}%"
+
+
+def fit_terminal(line: str) -> str:
+    columns = shutil.get_terminal_size((120, 20)).columns
+    max_width = max(40, columns - 1)
+    if len(line) <= max_width:
+        return line
+    return line[: max_width - 3] + "..."
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return "n/a"
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def format_rate(value: float) -> str:
+    if not math.isfinite(value):
+        return "n/a tok/s"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M tok/s"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.1f}K tok/s"
+    return f"{value:.1f} tok/s"
+
+
+def format_count(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    if abs(value) >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
+def format_metric(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.4f}"
 
 
 def resolve_tokenizer_path(config: TrainConfig) -> str | None:
