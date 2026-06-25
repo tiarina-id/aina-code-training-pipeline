@@ -125,13 +125,11 @@ def sync_dataset_from_s3(s3_dataset: str | None, dataset_dir: str | Path) -> lis
         return []
     try:
         import boto3
-        from botocore.exceptions import ClientError
     except ImportError as exc:
         raise RuntimeError("boto3 is required for S3 dataset sync") from exc
 
     bucket, prefix = parse_s3_uri(s3_dataset)
     client = boto3.client("s3")
-    ensure_ready_marker(client, bucket, prefix, ClientError)
     output_path.mkdir(parents=True, exist_ok=True)
     downloaded: list[str] = []
     paginator = client.get_paginator("list_objects_v2")
@@ -179,17 +177,6 @@ def expected_dataset_files(metadata: dict[str, Any]) -> list[str]:
         if path:
             files.append(path)
     return files
-
-
-def ensure_ready_marker(client, bucket: str, prefix: str, client_error_type) -> None:
-    ready_key = f"{prefix}checkpoint/READY.json"
-    try:
-        client.get_object(Bucket=bucket, Key=ready_key)
-    except client_error_type as exc:
-        code = exc.response.get("Error", {}).get("Code")
-        if code in {"NoSuchKey", "404", "NotFound"}:
-            raise RuntimeError(f"S3 dataset is not marked ready: s3://{bucket}/{ready_key}") from exc
-        raise
 
 
 def get_ready_json(client, bucket: str, key: str, client_error_type) -> dict[str, Any] | None:

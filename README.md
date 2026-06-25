@@ -94,7 +94,7 @@ metadata.json
 manifest.json
 ```
 
-On server configs, `s3_dataset` points to the preprocessing VM output. The training VM downloads the dataset into `dataset_dir` before training starts, and refuses to sync unless `checkpoint/READY.json` exists in that S3 prefix.
+On server configs, `s3_dataset` points to the preprocessing VM output. The training VM downloads the dataset into `dataset_dir` before training starts, then validates the local copy against `metadata.json` and the listed shards.
 
 Override per run if the preprocessing VM uploaded to a different prefix:
 
