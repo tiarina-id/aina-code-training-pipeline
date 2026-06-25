@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+import dataclasses
+import json
+import math
+import os
+import time
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.distributed as dist
+
+from .checkpoint import latest_checkpoint_path, load_checkpoint, save_checkpoint
+from .config import TrainConfig, config_hash, ensure_dirs
+from .data import build_datasets, load_dataset_metadata
+from .hf_model import build_model, count_parameters, estimate_tokens_per_second, save_hf_model, unwrap_model
+from .tokenizer import load_tokenizer
+from .upload_s3 import restore_training_checkpoint_from_s3, sync_dataset_from_s3, upload_outputs, upload_training_checkpoint
+
+
+def run_training(config: TrainConfig, *, resume: bool | None = None, skip_upload: bool = False) -> dict[str, Any]:
+    ensure_dirs(config)
+    torch.manual_seed(config.seed)
+    ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+    if ddp:
+        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+    device = resolve_device(config.device, local_rank)
+    is_master = rank == 0
+    if is_master:
+        downloaded = sync_dataset_from_s3(config.s3_dataset, config.dataset_dir)
+        if downloaded:
+            print(f"s3_dataset_sync files={len(downloaded)} destination={config.dataset_dir}", flush=True)
+        should_resume = config.resume if resume is None else resume
+        if should_resume and not skip_upload:
+            restored = restore_training_checkpoint_from_s3(config.s3_output, config.output_dir)
+            if restored:
+                print(f"s3_checkpoint_restore files={len(restored)} destination={config.output_dir}", flush=True)
+    if ddp:
+        dist.barrier()
+
+    tokenizer_path = resolve_tokenizer_path(config)
+    tokenizer = load_tokenizer(tokenizer_path, fallback=config.tokenizer_fallback) if tokenizer_path or config.tokenizer_fallback else None
+    if config.stage == "sft" and tokenizer is None:
+        raise ValueError("SFT requires tokenizer_path or tokenizer_fallback")
+    model_config = resolve_model_config(config, tokenizer_vocab_size=getattr(tokenizer, "vocab_size", None))
+    model = build_model(
+        model_config,
+        bos_token_id=getattr(tokenizer, "bos_token_id", None),
+        eos_token_id=getattr(tokenizer, "eos_token_id", None),
+        pad_token_id=getattr(tokenizer, "pad_token_id", None),
+    ).to(device)
+    if config.init_checkpoint:
+        init_path = Path(config.init_checkpoint)
+        if not init_path.exists() and config.init_s3_output and is_master:
+            restored = restore_training_checkpoint_from_s3(config.init_s3_output, init_path.parent)
+            if restored:
+                print(f"s3_init_checkpoint_restore files={len(restored)} destination={init_path.parent}", flush=True)
+        if ddp:
+            dist.barrier()
+        if init_path.exists():
+            load_checkpoint(init_path, model=model, map_location=device)
+        else:
+            raise FileNotFoundError(
+                f"init_checkpoint is required but missing: {init_path}. "
+                "Run pretrain first or configure init_s3_output to restore the base checkpoint."
+            )
+
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+    cfg_hash = config_hash(dataclasses.replace(config, model=model_config))
+    start_step = 0
+    best_val_loss: float | None = None
+    should_resume = config.resume if resume is None else resume
+    latest = latest_checkpoint_path(config.output_dir)
+    if should_resume and latest.exists():
+        try:
+            state = load_checkpoint(latest, model=model, optimizer=optimizer, scheduler=scheduler, map_location=device)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Checkpoint is not compatible with the current HF/LLaMA model config: {latest}. "
+                "Use --no-resume or choose a clean output_dir after the HF migration."
+            ) from exc
+        start_step = int(state.get("step", 0))
+        best_val_loss = state.get("best_val_loss")
+
+    if ddp:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank] if device.type == "cuda" else None)
+    if config.compile:
+        model = torch.compile(model)
+
+    train_data, val_data = build_datasets(config, tokenizer, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp(device, config.dtype))
+    autocast_context = autocast_for(device, config.dtype)
+    history: list[dict[str, Any]] = []
+    step = start_step
+    last_log = time.time()
+    model.train()
+
+    while step < config.max_steps:
+        optimizer.zero_grad(set_to_none=True)
+        total_loss = 0.0
+        for _ in range(config.grad_accum_steps):
+            x, y = train_data.get_batch(config.batch_size, device)
+            with autocast_context:
+                outputs = model(input_ids=x, labels=y)
+                if outputs.loss is None:
+                    raise RuntimeError("loss was not produced")
+                loss = outputs.loss / config.grad_accum_steps
+            scaler.scale(loss).backward()
+            total_loss += float(loss.detach().cpu())
+        scaler.unscale_(optimizer)
+        if config.optimizer.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.optimizer.grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+        step += 1
+
+        if is_master and (step == 1 or step % config.log_interval == 0):
+            now = time.time()
+            step_tokens = config.batch_size * config.grad_accum_steps * model_config.sequence_length
+            tps = estimate_tokens_per_second(step_tokens * max(1, step - start_step), now - last_log)
+            last_log = now
+            print(
+                f"step={step}/{config.max_steps} loss={total_loss:.4f} lr={scheduler.get_last_lr()[0]:.6g} tok_s={tps:.1f}",
+                flush=True,
+            )
+
+        if is_master and (step == 1 or step % config.eval_interval == 0 or step == config.max_steps):
+            val_loss = evaluate(model, val_data, config, device, autocast_context)
+            best_val_loss = val_loss if best_val_loss is None else min(best_val_loss, val_loss)
+            row = {"step": step, "train_loss": total_loss, "val_loss": val_loss, "lr": scheduler.get_last_lr()[0]}
+            history.append(row)
+            write_report(config, model_config, model, history, best_val_loss, completed=step >= config.max_steps)
+
+        if is_master and (step % config.checkpoint_interval == 0 or step == config.max_steps):
+            save_checkpoint(
+                config.output_dir,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                step=step,
+                best_val_loss=best_val_loss,
+                config_hash=cfg_hash,
+            )
+            if not skip_upload:
+                uploaded = upload_training_checkpoint(config.output_dir, config.s3_output, step=step)
+                if uploaded:
+                    print(f"s3_checkpoint_upload step={step} files={len(uploaded)}", flush=True)
+
+    if is_master:
+        final_path = save_hf_model(config.output_dir, model, tokenizer)
+        report = write_report(config, model_config, model, history, best_val_loss, completed=True)
+        report["final_hf_dir"] = str(final_path)
+        uploaded = [] if skip_upload else upload_outputs(config.output_dir, config.s3_output)
+        report["uploaded"] = uploaded
+        config.resolved_report_path.write_text(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        report = {}
+
+    if ddp:
+        dist.destroy_process_group()
+    return report
+
+
+def resolve_tokenizer_path(config: TrainConfig) -> str | None:
+    candidates = []
+    if config.tokenizer_path:
+        candidates.append(Path(config.tokenizer_path))
+    candidates.append(Path(config.dataset_dir) / "tokenizer")
+    if config.init_checkpoint:
+        init_path = Path(config.init_checkpoint)
+        candidates.append(init_path.parent / "final_hf")
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return config.tokenizer_path
+
+
+def resolve_model_config(config: TrainConfig, *, tokenizer_vocab_size: int | None):
+    model_config = config.model
+    vocab_size = model_config.vocab_size
+    if vocab_size is None and config.stage == "pretrain":
+        vocab_size = int(load_dataset_metadata(config.dataset_dir)["vocab_size"])
+    if vocab_size is None and tokenizer_vocab_size is not None:
+        vocab_size = int(tokenizer_vocab_size)
+    if vocab_size is None:
+        raise ValueError("unable to resolve model vocab_size")
+    return dataclasses.replace(model_config, vocab_size=vocab_size)
+
+
+def resolve_device(device: str, local_rank: int) -> torch.device:
+    if device == "auto":
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            return torch.device("cuda", local_rank)
+        return torch.device("cpu")
+    resolved = torch.device(device)
+    if resolved.type == "cuda":
+        torch.cuda.set_device(resolved)
+    return resolved
+
+
+def use_amp(device: torch.device, dtype: str) -> bool:
+    return device.type == "cuda" and dtype in {"auto", "float16", "bfloat16"}
+
+
+def autocast_for(device: torch.device, dtype: str):
+    if not use_amp(device, dtype):
+        return nullcontext()
+    amp_dtype = torch.bfloat16 if dtype in {"auto", "bfloat16"} else torch.float16
+    return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.Optimizer:
+    decay: list[torch.nn.Parameter] = []
+    no_decay: list[torch.nn.Parameter] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if parameter.dim() >= 2 and not name.endswith("wte.weight"):
+            decay.append(parameter)
+        else:
+            no_decay.append(parameter)
+    return torch.optim.AdamW(
+        [
+            {"params": decay, "weight_decay": config.optimizer.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=config.optimizer.learning_rate,
+        betas=(config.optimizer.beta1, config.optimizer.beta2),
+    )
+
+
+def build_scheduler(optimizer: torch.optim.Optimizer, config: TrainConfig):
+    def lr_lambda(step: int) -> float:
+        if step < config.optimizer.warmup_steps:
+            return max(1e-8, step / max(1, config.optimizer.warmup_steps))
+        progress = (step - config.optimizer.warmup_steps) / max(1, config.max_steps - config.optimizer.warmup_steps)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+        min_ratio = config.optimizer.min_learning_rate / config.optimizer.learning_rate
+        return min_ratio + cosine * (1.0 - min_ratio)
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+@torch.no_grad()
+def evaluate(model, val_data, config: TrainConfig, device: torch.device, autocast_context) -> float:
+    del device
+    model.eval()
+    losses = []
+    for _ in range(config.eval_batches):
+        x, y = val_data.get_batch(config.batch_size, next(model.parameters()).device)
+        with autocast_context:
+            outputs = model(input_ids=x, labels=y)
+        if outputs.loss is not None:
+            losses.append(float(outputs.loss.detach().cpu()))
+    model.train()
+    return sum(losses) / max(1, len(losses))
+
+
+def write_report(
+    config: TrainConfig,
+    model_config,
+    model: torch.nn.Module,
+    history: list[dict[str, Any]],
+    best_val_loss: float | None,
+    *,
+    completed: bool,
+) -> dict[str, Any]:
+    report = {
+        "project": config.project_name,
+        "stage": config.stage,
+        "completed": completed,
+        "model": dataclasses.asdict(model_config),
+        "parameter_count": count_parameters(unwrap_model(model)),
+        "dataset_dir": config.dataset_dir,
+        "output_dir": config.output_dir,
+        "best_val_loss": best_val_loss,
+        "history": history,
+    }
+    config.resolved_report_path.write_text(json.dumps(report, indent=2, sort_keys=True))
+    return report

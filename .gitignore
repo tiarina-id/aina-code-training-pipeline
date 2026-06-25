@@ -1,0 +1,23 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime outputs
+*.pt
+*.safetensors
+checkpoint-*.pt
+final_model.pt
+final_hf/
+training_report.json
+eval_report.json
+generation_config.json
+model.safetensors
+pytorch_model*.bin
+*.index.json
+
+# Local scratch
+.cache/
+reports/
+logs/
