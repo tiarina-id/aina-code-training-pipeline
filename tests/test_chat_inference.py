@@ -15,7 +15,7 @@ except ModuleNotFoundError:
 
 from aina_train.chat import generate_chat_completion, normalize_openai_content, render_openai_messages
 from aina_train.config import ModelConfig
-from aina_train.hf_model import build_model
+from aina_train.hf_model import build_model, save_hf_model
 
 
 def write_tiny_final_hf(path: Path) -> None:
@@ -62,8 +62,7 @@ def write_tiny_final_hf(path: Path) -> None:
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
-    model.save_pretrained(path, safe_serialization=True)
-    tokenizer.save_pretrained(path)
+    save_hf_model(path.parent, model, tokenizer)
 
 
 class ChatInferenceTests(unittest.TestCase):
@@ -92,6 +91,7 @@ class ChatInferenceTests(unittest.TestCase):
             write_tiny_final_hf(final_hf)
             model = AutoModelForCausalLM.from_pretrained(final_hf)
             tokenizer = AutoTokenizer.from_pretrained(final_hf)
+            self.assertIn("chat_template", (final_hf / "tokenizer_config.json").read_text())
             cases = [
                 [
                     {"role": "system", "content": "You are Aina."},

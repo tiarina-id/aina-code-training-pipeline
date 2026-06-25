@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -7,6 +8,12 @@ import torch
 from transformers import GenerationConfig, LlamaConfig, LlamaForCausalLM
 
 from .config import ModelConfig
+
+
+AINA_CHAT_TEMPLATE = """{% for message in messages %}<|{{ message['role'] }}|>
+{{ message['content'] }}
+{% endfor %}{% if add_generation_prompt %}<|assistant|>
+{% endif %}"""
 
 
 def build_llama_config(
@@ -64,10 +71,22 @@ def save_hf_model(output_dir: str | Path, model: torch.nn.Module, tokenizer=None
     model_to_save = unwrap_model(model)
     model_to_save.save_pretrained(final_dir, safe_serialization=True)
     if tokenizer is not None and hasattr(tokenizer, "save_pretrained"):
+        if not getattr(tokenizer, "chat_template", None):
+            tokenizer.chat_template = AINA_CHAT_TEMPLATE
         tokenizer.save_pretrained(final_dir)
+        ensure_chat_template(final_dir)
     generation_config = GenerationConfig.from_model_config(model_to_save.config)
     generation_config.save_pretrained(final_dir)
     return final_dir
+
+
+def ensure_chat_template(final_dir: str | Path) -> None:
+    tokenizer_config_path = Path(final_dir) / "tokenizer_config.json"
+    if not tokenizer_config_path.exists():
+        return
+    tokenizer_config = json.loads(tokenizer_config_path.read_text())
+    tokenizer_config.setdefault("chat_template", AINA_CHAT_TEMPLATE)
+    tokenizer_config_path.write_text(json.dumps(tokenizer_config, indent=2, sort_keys=True) + "\n")
 
 
 def estimate_tokens_per_second(step_tokens: int, elapsed_seconds: float) -> float:
