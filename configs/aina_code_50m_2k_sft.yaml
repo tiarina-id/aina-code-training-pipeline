@@ -1,12 +1,12 @@
 project_name: aina-1-code-50m-2k-sft
 stage: sft
 dataset_dir: /data/aina-code/datasets/aina-1-code-50m-2k/sft
-s3_dataset: s3://aina-code/v1/datasets/aina-1-code-50m-2k/sft/
+s3_dataset: s3://aina-code-532101712983-us-east-2-an/v1/datasets/aina-1-code-50m-2k/sft/
 tokenizer_path: /data/aina-code/datasets/aina-1-code-50m-2k/pretrain/tokenizer
 init_checkpoint: /data/aina-code/training/aina-1-code-50m-2k/pretrain/checkpoint-latest.pt
-init_s3_output: s3://aina-code/v1/training/aina-1-code-50m-2k/pretrain/
+init_s3_output: s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-50m-2k/pretrain/
 output_dir: /data/aina-code/training/aina-1-code-50m-2k/sft
-s3_output: s3://aina-code/v1/training/aina-1-code-50m-2k/sft/
+s3_output: s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-50m-2k/sft/
 seed: 42
 batch_size: 8
 grad_accum_steps: 8

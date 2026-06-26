@@ -61,7 +61,7 @@ source ~/.bashrc
 export AWS_DEFAULT_REGION=ap-southeast-3
 
 aws sts get-caller-identity
-aws s3 ls s3://aina-code/v1/datasets/aina-1-code-3m-1k/ --recursive --summarize
+aws s3 ls s3://aina-code-532101712983-us-east-2-an/v1/datasets/aina-1-code-3m-1k/ --recursive --summarize
 
 source .venv/bin/activate
 python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
@@ -87,23 +87,23 @@ Mini test 3M 1K:
 python scripts/train.py --config configs/aina_code_3m_1k_pretrain.yaml --resume
 python scripts/train.py --config configs/aina_code_3m_1k_sft.yaml --resume
 
-aws s3 ls s3://aina-code/v1/training/aina-1-code-3m-1k/ --recursive --summarize
+aws s3 ls s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-3m-1k/ --recursive --summarize
 ```
 
 Opsional hapus checkpoint training setelah `final_hf/` aman:
 
 ```bash
-aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/pretrain/ \
+aws s3 rm s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-3m-1k/pretrain/ \
   --recursive \
   --exclude "*" \
   --include "checkpoint-*.pt"
-aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/pretrain/checkpoint/ --recursive
+aws s3 rm s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-3m-1k/pretrain/checkpoint/ --recursive
 
-aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/sft/ \
+aws s3 rm s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-3m-1k/sft/ \
   --recursive \
   --exclude "*" \
   --include "checkpoint-*.pt"
-aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/sft/checkpoint/ --recursive
+aws s3 rm s3://aina-code-532101712983-us-east-2-an/v1/training/aina-1-code-3m-1k/sft/checkpoint/ --recursive
 ```
 
 ## Local CPU
@@ -179,7 +179,7 @@ Override per run if the preprocessing VM uploaded to a different prefix:
 ```bash
 python scripts/train.py \
   --config configs/aina_code_50m_2k_pretrain.yaml \
-  --s3-dataset s3://aina-code/v1/datasets/aina-1-code-50m-2k/pretrain/ \
+  --s3-dataset s3://aina-code-532101712983-us-east-2-an/v1/datasets/aina-1-code-50m-2k/pretrain/ \
   --dataset-dir /data/aina-code/datasets/aina-1-code-50m-2k/pretrain \
   --resume
 ```
