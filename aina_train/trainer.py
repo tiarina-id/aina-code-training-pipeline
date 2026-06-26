@@ -225,6 +225,7 @@ class TrainingProgress:
             f"device={device} dtype={config.dtype} batch={config.batch_size} grad_accum={config.grad_accum_steps} "
             f"effective_batch={effective_batch} step_tokens={format_count(self.step_tokens)}",
         )
+        self.event("runtime", runtime_diagnostics(model, device, config.dtype))
         self.event(
             "schedule",
             f"start_step={start_step} max_steps={config.max_steps} remaining={remaining} "
@@ -397,6 +398,29 @@ def autocast_for(device: torch.device, dtype: str):
         return nullcontext()
     amp_dtype = torch.bfloat16 if dtype in {"auto", "bfloat16"} else torch.float16
     return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def runtime_diagnostics(model: torch.nn.Module, device: torch.device, dtype: str) -> str:
+    first_parameter = next(unwrap_model(model).parameters(), None)
+    parameter_dtype = first_parameter.dtype if first_parameter is not None else "none"
+    autocast_dtype = torch.bfloat16 if use_amp(device, dtype) and dtype in {"auto", "bfloat16"} else (
+        torch.float16 if use_amp(device, dtype) else "off"
+    )
+    parts = [
+        f"param_dtype={parameter_dtype}",
+        f"autocast_dtype={autocast_dtype}",
+    ]
+    if device.type == "cuda":
+        parts.extend(
+            [
+                f"tf32_matmul={torch.backends.cuda.matmul.allow_tf32}",
+                f"tf32_cudnn={torch.backends.cudnn.allow_tf32}",
+                f"flash_sdp={torch.backends.cuda.flash_sdp_enabled()}",
+                f"mem_efficient_sdp={torch.backends.cuda.mem_efficient_sdp_enabled()}",
+                f"math_sdp={torch.backends.cuda.math_sdp_enabled()}",
+            ]
+        )
+    return " ".join(parts)
 
 
 def build_optimizer(model: torch.nn.Module, config: TrainConfig) -> torch.optim.Optimizer:
