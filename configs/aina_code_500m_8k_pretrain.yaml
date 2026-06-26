@@ -15,7 +15,7 @@ checkpoint_interval: 1000
 log_interval: 10
 device: auto
 dtype: auto
-compile: true
+compile: false
 
 model:
   name: aina-1-code-0.5b-8k
