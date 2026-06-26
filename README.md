@@ -199,10 +199,11 @@ Every local checkpoint interval also backs up:
 
 ```text
 checkpoint-latest.pt
-checkpoint-step-*.pt
 training_report.json
 checkpoint/READY.json
 ```
+
+`checkpoint-step-*.pt` stays local by default to avoid repeated large S3 transfers. S3 resume uses `checkpoint-latest.pt`.
 
 If a training VM is replaced and `--resume` is used, the new VM restores `checkpoint-latest.pt` from `s3_output` when no local checkpoint exists.
 

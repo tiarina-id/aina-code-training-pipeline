@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aina_train.upload_s3 import (
     dataset_ready,
@@ -11,6 +14,9 @@ from aina_train.upload_s3 import (
     get_ready_json,
     parse_s3_uri,
     should_skip_dataset_key,
+    should_upload_final_output,
+    upload_outputs,
+    upload_training_checkpoint,
 )
 
 
@@ -58,11 +64,81 @@ class S3DatasetTests(unittest.TestCase):
 
         self.assertIsNone(get_ready_json(MissingClient(), "bucket", "checkpoint/READY.json", FakeClientError))
 
+    def test_checkpoint_upload_excludes_numbered_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "checkpoint-latest.pt").write_bytes(b"latest")
+            (root / "checkpoint-step-00001000.pt").write_bytes(b"numbered")
+            (root / "training_report.json").write_text("{}")
+
+            client = FakeS3Client()
+            with fake_boto3(client):
+                uploaded = upload_training_checkpoint(root, "s3://bucket/out/", step=1000)
+
+        self.assertEqual(
+            [item[1] for item in client.uploads],
+            ["out/checkpoint-latest.pt", "out/training_report.json"],
+        )
+        self.assertEqual(len(client.puts), 1)
+        ready = json.loads(client.puts[0][1].decode("utf-8"))
+        self.assertEqual(ready["latest_checkpoint"], "checkpoint-latest.pt")
+        self.assertNotIn("numbered_checkpoint", ready)
+        self.assertEqual(len(uploaded), 3)
+
+    def test_final_upload_excludes_numbered_checkpoints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "checkpoint-latest.pt").write_bytes(b"latest")
+            (root / "checkpoint-step-00001000.pt").write_bytes(b"numbered")
+            (root / "training_report.json").write_text("{}")
+            (root / "final_hf").mkdir()
+            (root / "final_hf" / "model.safetensors").write_bytes(b"model")
+
+            client = FakeS3Client()
+            with fake_boto3(client):
+                upload_outputs(root, "s3://bucket/out/")
+
+        self.assertEqual(
+            sorted(item[1] for item in client.uploads),
+            [
+                "out/checkpoint-latest.pt",
+                "out/final_hf/model.safetensors",
+                "out/training_report.json",
+            ],
+        )
+        self.assertEqual(len(client.puts), 1)
+
+    def test_should_upload_final_output(self):
+        self.assertTrue(should_upload_final_output("checkpoint-latest.pt"))
+        self.assertTrue(should_upload_final_output("training_report.json"))
+        self.assertTrue(should_upload_final_output("final_hf/model.safetensors"))
+        self.assertFalse(should_upload_final_output("checkpoint-step-00001000.pt"))
+        self.assertFalse(should_upload_final_output("checkpoint/READY.json"))
+
 
 class FakeClientError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.response = {"Error": {"Code": code}}
+
+
+class FakeS3Client:
+    def __init__(self) -> None:
+        self.uploads: list[tuple[str, str]] = []
+        self.puts: list[tuple[str, bytes]] = []
+
+    def upload_file(self, local_file, bucket, key):
+        del bucket
+        self.uploads.append((Path(local_file).name, key))
+
+    def put_object(self, *, Bucket, Key, Body, ContentType):
+        del Bucket, ContentType
+        self.puts.append((Key, Body))
+
+
+def fake_boto3(client):
+    boto3_module = types.SimpleNamespace(client=lambda service: client)
+    return patch.dict(sys.modules, {"boto3": boto3_module})
 
 
 if __name__ == "__main__":

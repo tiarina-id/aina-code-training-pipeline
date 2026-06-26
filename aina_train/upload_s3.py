@@ -19,7 +19,10 @@ def upload_outputs(output_dir: str | Path, s3_output: str | None) -> list[str]:
     for path in Path(output_dir).rglob("*"):
         if not path.is_file():
             continue
-        key = f"{prefix}{path.relative_to(output_dir).as_posix()}"
+        relative = path.relative_to(output_dir).as_posix()
+        if not should_upload_final_output(relative):
+            continue
+        key = f"{prefix}{relative}"
         client.upload_file(str(path), bucket, key)
         uploaded.append(f"s3://{bucket}/{key}")
     ready_key = f"{prefix}checkpoint/READY.json"
@@ -45,7 +48,6 @@ def upload_training_checkpoint(output_dir: str | Path, s3_output: str | None, *,
     client = boto3.client("s3")
     files = [
         output_path / "checkpoint-latest.pt",
-        output_path / f"checkpoint-step-{step:08d}.pt",
         output_path / "training_report.json",
     ]
     uploaded: list[str] = []
@@ -66,7 +68,6 @@ def upload_training_checkpoint(output_dir: str | Path, s3_output: str | None, *,
                 "created_unix_ms": int(time.time() * 1000),
                 "latest_step": step,
                 "latest_checkpoint": "checkpoint-latest.pt",
-                "numbered_checkpoint": f"checkpoint-step-{step:08d}.pt",
                 "uploaded_keys": uploaded_keys,
             }
         ).encode("utf-8"),
@@ -193,6 +194,14 @@ def get_ready_json(client, bucket: str, key: str, client_error_type) -> dict[str
 
 def should_skip_dataset_key(relative: str) -> bool:
     return relative.startswith("checkpoint/") or relative.endswith(".partial.json")
+
+
+def should_upload_final_output(relative: str) -> bool:
+    return (
+        relative == "checkpoint-latest.pt"
+        or relative == "training_report.json"
+        or relative.startswith("final_hf/")
+    )
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
