@@ -30,47 +30,47 @@ The current trainer uses Hugging Face LLaMA-compatible models and exports `final
 
 ## Local CPU
 
-Pretrain 3M:
+Pretrain 3M 1K:
 
 ```bash
 python scripts/train.py \
-  --config configs/aina_code_pretrain_3m_local.yaml \
+  --config configs/aina_code_3m_1k_pretrain.yaml \
   --skip-upload \
   --no-resume
 ```
 
 The local 3M configs also include S3 dataset/output prefixes. Use `--skip-upload` to avoid uploading training checkpoints/results while still allowing dataset restore from S3 when `dataset_dir` is empty.
 
-SFT 3M:
+SFT 3M 1K:
 
 ```bash
 python scripts/train.py \
-  --config configs/aina_code_sft_3m_local.yaml \
+  --config configs/aina_code_3m_1k_sft.yaml \
   --skip-upload \
   --no-resume
 ```
 
 ## Server
 
-50M:
+50M 2K:
 
 ```bash
-python scripts/train.py --config configs/aina_code_pretrain_50m_server.yaml --resume
-python scripts/train.py --config configs/aina_code_sft_50m_server.yaml --resume
+python scripts/train.py --config configs/aina_code_50m_2k_pretrain.yaml --resume
+python scripts/train.py --config configs/aina_code_50m_2k_sft.yaml --resume
 ```
 
-500M:
+500M 8K:
 
 ```bash
-python scripts/train.py --config configs/aina_code_pretrain_500m_server.yaml --resume
-python scripts/train.py --config configs/aina_code_sft_500m_server.yaml --resume
+python scripts/train.py --config configs/aina_code_500m_8k_pretrain.yaml --resume
+python scripts/train.py --config configs/aina_code_500m_8k_sft.yaml --resume
 ```
 
 Optional multi-process launch if a later server has more than one GPU:
 
 ```bash
 torchrun --nproc_per_node=2 scripts/train.py \
-  --config configs/aina_code_pretrain_50m_server.yaml \
+  --config configs/aina_code_50m_2k_pretrain.yaml \
   --resume
 ```
 
@@ -100,9 +100,9 @@ Override per run if the preprocessing VM uploaded to a different prefix:
 
 ```bash
 python scripts/train.py \
-  --config configs/aina_code_pretrain_50m_server.yaml \
-  --s3-dataset s3://aina-code-datasets/v1/pretrain/aina-code-50m-1b/ \
-  --dataset-dir /data/aina-dataset/pretrain/aina-code-50m-1b \
+  --config configs/aina_code_50m_2k_pretrain.yaml \
+  --s3-dataset s3://aina-code/v1/datasets/aina-1-code-50m-2k/pretrain/ \
+  --dataset-dir /data/aina-code/datasets/aina-1-code-50m-2k/pretrain \
   --resume
 ```
 

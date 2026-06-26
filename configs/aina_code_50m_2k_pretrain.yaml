@@ -1,10 +1,10 @@
-project_name: aina-code-50m-pretrain
+project_name: aina-1-code-50m-2k-pretrain
 stage: pretrain
-dataset_dir: /data/aina-dataset/pretrain/aina-code-50m-1b
-s3_dataset: s3://aina-code-datasets/v1/pretrain/aina-code-50m-1b/
-tokenizer_path: /data/aina-dataset/pretrain/aina-code-50m-1b/tokenizer
-output_dir: /data/aina-training/pretrain/aina-code-50m
-s3_output: s3://aina-code-datasets/v1/training/pretrain/aina-code-50m/
+dataset_dir: /data/aina-code/datasets/aina-1-code-50m-2k/pretrain
+s3_dataset: s3://aina-code/v1/datasets/aina-1-code-50m-2k/pretrain/
+tokenizer_path: /data/aina-code/datasets/aina-1-code-50m-2k/pretrain/tokenizer
+output_dir: /data/aina-code/training/aina-1-code-50m-2k/pretrain
+s3_output: s3://aina-code/v1/training/aina-1-code-50m-2k/pretrain/
 seed: 42
 batch_size: 16
 grad_accum_steps: 8
@@ -18,7 +18,7 @@ dtype: auto
 compile: false
 
 model:
-  name: aina-code-50m
+  name: aina-1-code-50m-2k
   architecture: llama
   sequence_length: 2048
   hidden_size: 512

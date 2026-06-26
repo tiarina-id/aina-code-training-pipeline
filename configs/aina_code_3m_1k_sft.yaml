@@ -1,0 +1,44 @@
+project_name: aina-1-code-3m-1k-sft
+stage: sft
+dataset_dir: /data/aina-code/datasets/aina-1-code-3m-1k/sft
+s3_dataset: s3://aina-code/v1/datasets/aina-1-code-3m-1k/sft/
+tokenizer_path: /data/aina-code/datasets/aina-1-code-3m-1k/pretrain/tokenizer
+init_checkpoint: /data/aina-code/training/aina-1-code-3m-1k/pretrain/checkpoint-latest.pt
+init_s3_output: s3://aina-code/v1/training/aina-1-code-3m-1k/pretrain/
+output_dir: /data/aina-code/training/aina-1-code-3m-1k/sft
+s3_output: s3://aina-code/v1/training/aina-1-code-3m-1k/sft/
+seed: 42
+batch_size: 2
+grad_accum_steps: 1
+max_steps: 20
+eval_interval: 5
+eval_batches: 2
+checkpoint_interval: 10
+log_interval: 1
+device: auto
+dtype: auto
+compile: false
+sft_max_length: 1024
+sft_assistant_only_loss: true
+
+model:
+  name: aina-1-code-3m-1k
+  architecture: llama
+  sequence_length: 1024
+  hidden_size: 64
+  intermediate_size: 256
+  num_hidden_layers: 6
+  num_attention_heads: 4
+  num_key_value_heads: 4
+  dropout: 0.0
+  attention_dropout: 0.0
+  tie_word_embeddings: true
+
+optimizer:
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  warmup_steps: 5
+  min_learning_rate: 0.00002

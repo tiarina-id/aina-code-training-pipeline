@@ -1,12 +1,12 @@
-project_name: aina-code-50m-sft
+project_name: aina-1-code-50m-2k-sft
 stage: sft
-dataset_dir: /data/aina-dataset/sft/aina-code-50m-instruct-v1
-s3_dataset: s3://aina-code-datasets/v1/sft/aina-code-50m-instruct-v1/
-tokenizer_path: /data/aina-dataset/pretrain/aina-code-50m-1b/tokenizer
-init_checkpoint: /data/aina-training/pretrain/aina-code-50m/checkpoint-latest.pt
-init_s3_output: s3://aina-code-datasets/v1/training/pretrain/aina-code-50m/
-output_dir: /data/aina-training/sft/aina-code-50m
-s3_output: s3://aina-code-datasets/v1/training/sft/aina-code-50m/
+dataset_dir: /data/aina-code/datasets/aina-1-code-50m-2k/sft
+s3_dataset: s3://aina-code/v1/datasets/aina-1-code-50m-2k/sft/
+tokenizer_path: /data/aina-code/datasets/aina-1-code-50m-2k/pretrain/tokenizer
+init_checkpoint: /data/aina-code/training/aina-1-code-50m-2k/pretrain/checkpoint-latest.pt
+init_s3_output: s3://aina-code/v1/training/aina-1-code-50m-2k/pretrain/
+output_dir: /data/aina-code/training/aina-1-code-50m-2k/sft
+s3_output: s3://aina-code/v1/training/aina-1-code-50m-2k/sft/
 seed: 42
 batch_size: 8
 grad_accum_steps: 8
@@ -22,7 +22,7 @@ sft_max_length: 2048
 sft_assistant_only_loss: true
 
 model:
-  name: aina-code-50m
+  name: aina-1-code-50m-2k
   architecture: llama
   sequence_length: 2048
   hidden_size: 512
