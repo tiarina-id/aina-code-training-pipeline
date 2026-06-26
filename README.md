@@ -28,6 +28,84 @@ PyTorch is intentionally not installed by this repo for local setup. Install the
 
 The current trainer uses Hugging Face LLaMA-compatible models and exports `final_hf/`. Checkpoints produced by the older custom GPT backend are not compatible; use `--no-resume` or a clean `output_dir` after migrating.
 
+## VM Setup
+
+Syarat awal:
+
+- Pasang IAM role ke EC2 yang punya akses S3 bucket `aina-code`.
+- Install NVIDIA driver manual dulu, lalu reboot.
+- PyTorch tetap install manual di dalam venv training.
+
+Contoh install driver manual:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/mutawakkilalallah/cloud-setup/main/aws-nvidia | bash -s -- 26
+sudo reboot
+```
+
+Setelah reboot:
+
+```bash
+export PATH=${PATH}:/usr/local/cuda-13.0/bin
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/cuda-13.0/lib64
+
+nvidia-smi
+
+cd ~
+git clone https://github.com/tiarina-id/aina-code-training-pipeline.git training-pipeline
+cd ~/training-pipeline
+
+SWAP_GB=8 AINA_AUTO_CONFIRM=1 bash setup.sh
+
+source ~/.bashrc
+export AWS_DEFAULT_REGION=ap-southeast-3
+
+aws sts get-caller-identity
+aws s3 ls s3://aina-code/v1/datasets/aina-1-code-3m-1k/ --recursive --summarize
+
+source .venv/bin/activate
+python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda runtime:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("gpu:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no cuda")
+PY
+
+sudo apt-get install -y tmux jq
+deactivate 2>/dev/null || true
+tmux new -s train
+
+source .venv/bin/activate
+```
+
+Mini test 3M 1K:
+
+```bash
+python scripts/train.py --config configs/aina_code_3m_1k_pretrain.yaml --resume
+python scripts/train.py --config configs/aina_code_3m_1k_sft.yaml --resume
+
+aws s3 ls s3://aina-code/v1/training/aina-1-code-3m-1k/ --recursive --summarize
+```
+
+Opsional hapus checkpoint training setelah `final_hf/` aman:
+
+```bash
+aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/pretrain/ \
+  --recursive \
+  --exclude "*" \
+  --include "checkpoint-*.pt"
+aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/pretrain/checkpoint/ --recursive
+
+aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/sft/ \
+  --recursive \
+  --exclude "*" \
+  --include "checkpoint-*.pt"
+aws s3 rm s3://aina-code/v1/training/aina-1-code-3m-1k/sft/checkpoint/ --recursive
+```
+
 ## Local CPU
 
 Pretrain 3M 1K:
@@ -127,6 +205,90 @@ checkpoint/READY.json
 ```
 
 If a training VM is replaced and `--resume` is used, the new VM restores `checkpoint-latest.pt` from `s3_output` when no local checkpoint exists.
+
+## Serve
+
+Install vLLM:
+
+```bash
+cd /data/aina-code
+python3 -m venv vllm-venv
+source /data/aina-code/vllm-venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install vllm openai
+```
+
+Serve pretrain/base model:
+
+```bash
+source /data/aina-code/vllm-venv/bin/activate
+
+vllm serve /data/aina-code/training/aina-1-code-3m-1k/pretrain/final_hf \
+  --served-model-name aina-1-code-3m-1k-pretrain \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --dtype float16 \
+  --max-model-len 1024 \
+  --generation-config vllm
+```
+
+Test pretrain/base:
+
+```bash
+curl -s http://localhost:8000/v1/models | jq
+
+curl -s http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "aina-1-code-3m-1k-pretrain",
+    "prompt": "def add(a, b):",
+    "max_tokens": 80,
+    "temperature": 0.2
+  }' | jq -r '
+    if .error then
+      "ERROR: " + .error.message
+    else
+      .choices[0].text
+    end
+  '
+```
+
+Serve SFT/instruct model. Stop server pretrain dulu dengan `Ctrl+C`, lalu jalankan:
+
+```bash
+source /data/aina-code/vllm-venv/bin/activate
+
+vllm serve /data/aina-code/training/aina-1-code-3m-1k/sft/final_hf \
+  --served-model-name aina-1-code-3m-1k-sft \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --dtype float16 \
+  --max-model-len 1024 \
+  --generation-config vllm
+```
+
+Test SFT/instruct:
+
+```bash
+curl -s http://localhost:8000/v1/models | jq
+
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "aina-1-code-3m-1k-sft",
+    "messages": [
+      {"role": "user", "content": "Buat fungsi Python add(a, b)."}
+    ],
+    "max_tokens": 128,
+    "temperature": 0.2
+  }' | jq -r '
+    if .error then
+      "ERROR: " + .error.message
+    else
+      .choices[0].message.content
+    end
+  '
+```
 
 ## Test
 
